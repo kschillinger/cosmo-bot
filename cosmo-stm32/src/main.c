@@ -1,14 +1,15 @@
 /**
  * Cosmo Bot — STM32L476RG (Nucleo-64)
  * ============================================================================
- * Phase 1: UART link bring-up
+ * Phase 2 skeleton: top-level FSM bring-up.
  *
  * Responsibilities (this phase):
- *   - Configure 80 MHz SYSCLK from HSI16 + PLL
- *   - Init USART2 for printf debug via ST-Link VCP
- *   - Init USART1 for protocol link to ESP32-C3
- *   - On user button press (B1 / PC13): send "[USER_INPUT: test message]\r\n"
- *   - On incoming "[BOT_RESPONSE: ...]\r\n" from ESP32: log it & toggle LD2
+ *   - 80 MHz SYSCLK (HSI16 + PLL), GPIO + USART2 (printf debug) + USART1 (ESP32)
+ *   - Initialize the orchestration FSM (fsm.c) which sequences capture,
+ *     STT, ESP32 round-trip, TTS, and playback through subsystem stubs.
+ *
+ * The Phase 1 button-test loop has been replaced. B1 (PC13) is now consumed
+ * by the FSM (system_button_pressed_edge()) to leave IDLE.
  *
  * Pin map (Nucleo-L476RG):
  *   PA2  USART2_TX  -> ST-Link VCP (printf debug)
@@ -16,7 +17,7 @@
  *   PA5  LD2 (green LED, output)
  *   PA9  USART1_TX  -> ESP32 GPIO5 (Serial1 RX)    [CN10-21]
  *   PA10 USART1_RX  <- ESP32 GPIO4 (Serial1 TX)    [CN10-33]
- *   PC13 B1 user button (input, active low — board has external pull-up)
+ *   PC13 B1 user button (input, active low)
  *
  * Build / flash:
  *   pio run -e nucleo_l476rg -t upload
@@ -25,12 +26,11 @@
  */
 
 #include "stm32l4xx_hal.h"
-#include "uart_link.h"
 #include "debug_uart.h"
+#include "fsm.h"
+#include "system_utils.h"
 
 #include <stdio.h>
-#include <string.h>
-#include <stdbool.h>
 
 /* ---- Pin defines --------------------------------------------------------- */
 #define BUTTON_PORT     GPIOC
@@ -49,39 +49,22 @@ int main(void)
     HAL_Init();
     SystemClock_Config();
     GPIO_Init();
-    DebugUart_Init();
-    UartLink_Init();
+    DebugUart_Init();           /* retargets printf() to USART2 / ST-Link VCP  */
 
     printf("\r\n");
     printf("==========================================\r\n");
-    printf(" Cosmo Bot — STM32L476RG  Phase 1\r\n");
-    printf(" SYSCLK = %lu Hz\r\n", (unsigned long)HAL_RCC_GetSysClockFreq());
-    printf(" Press B1 (blue button) to send a test\r\n");
-    printf(" USER_INPUT to the ESP32-C3.\r\n");
+    printf(" Cosmo Bot — STM32L476RG  Phase 2 (FSM)\r\n");
+    printf(" SYSCLK = %lu Hz\r\n",
+           (unsigned long)HAL_RCC_GetSysClockFreq());
+    printf(" Press B1 to start a conversational round.\r\n");
     printf("==========================================\r\n");
 
-    char rx_buffer[256];
-    GPIO_PinState last_button = GPIO_PIN_SET;  /* not pressed */
+    fsm_init();                 /* brings up audio/stt/uart/tts/oled stubs    */
 
+    /* Main FSM loop. ~10 ms tick gives smooth animation and keeps CPU idle.  */
     while (1) {
-        /* Poll button (active low; ~20 ms debounce) */
-        GPIO_PinState now = HAL_GPIO_ReadPin(BUTTON_PORT, BUTTON_PIN);
-        if (now == GPIO_PIN_RESET && last_button == GPIO_PIN_SET) {
-            HAL_Delay(20);
-            if (HAL_GPIO_ReadPin(BUTTON_PORT, BUTTON_PIN) == GPIO_PIN_RESET) {
-                printf("[STM32] button -> sending USER_INPUT\r\n");
-                UartLink_SendUserInput("test message");
-            }
-        }
-        last_button = now;
-
-        /* Drain any complete BOT_RESPONSE lines from the link */
-        if (UartLink_PollBotResponse(rx_buffer, sizeof(rx_buffer))) {
-            printf("[STM32] <- BOT_RESPONSE: %s\r\n", rx_buffer);
-            HAL_GPIO_TogglePin(LED_PORT, LED_PIN);
-        }
-
-        HAL_Delay(5);
+        fsm_run();
+        system_delay_ms(10);
     }
 }
 
@@ -93,7 +76,6 @@ static void SystemClock_Config(void)
     RCC_OscInitTypeDef osc = {0};
     RCC_ClkInitTypeDef clk = {0};
 
-    /* Voltage scale 1 required for 80 MHz */
     __HAL_RCC_PWR_CLK_ENABLE();
     HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1);
 
@@ -126,7 +108,7 @@ static void GPIO_Init(void)
     __HAL_RCC_GPIOA_CLK_ENABLE();
     __HAL_RCC_GPIOC_CLK_ENABLE();
 
-    /* LD2 (PA5) — output push-pull */
+    /* LD2 (PA5) — output push-pull. Driven by FSM later as a state indicator. */
     g.Pin   = LED_PIN;
     g.Mode  = GPIO_MODE_OUTPUT_PP;
     g.Pull  = GPIO_NOPULL;
