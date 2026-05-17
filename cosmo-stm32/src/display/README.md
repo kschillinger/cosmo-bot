@@ -1,16 +1,17 @@
-# OLED display driver — `cosmo-stm32/src/display/`
+# OLED display driver — I2C variant — `cosmo-stm32/src/display/`
 
-128x128 monochrome OLED driver for the cosmo-bot, targeting **STM32L476** at
-80 MHz, **SPI1 @ 10 MHz**, page-mode addressing. Compatible with **SSD1306**
-and **SH1106** controllers (select via `OLED_CONTROLLER_SSD1306` /
-`OLED_CONTROLLER_SH1106` build flag — SSD1306 is the default).
+128x64 (default) monochrome OLED driver for the cosmo-bot, targeting
+**STM32L476** at 80 MHz, **I2C1 @ 400 kHz**, horizontal addressing mode.
+Compatible with **SSD1306** (default, 128x64) — flip a define for
+**SH1107** (128x128).
 
-Layered as in the spec:
+This is the I2C-compatible companion to the SPI driver on the
+`screendrivers` branch.
 
 | Layer | File                  | Contents                                              |
 |------:|-----------------------|-------------------------------------------------------|
-| 2     | `oled_display.c`      | SPI command/data primitives, init, contrast, on/off   |
-| 3     | `oled_display.c`      | 2 KB framebuffer, set/get pixel, full + region flush  |
+| 2     | `oled_display.c`      | I2C cmd/data, init, contrast, on/off                  |
+| 3     | `oled_display.c`      | 1 KB framebuffer, full + region flush                 |
 | 4     | `oled_display.c`      | Bresenham line, midpoint circle, rect, text, bitmap   |
 | 5     | `oled_animations.c`   | State machine, idle/listening/processing/responding   |
 |  font | `font_5x7.{h,c}`      | 96-glyph ASCII bitmap (480 B Flash)                   |
@@ -19,27 +20,32 @@ Standalone bring-up demo: `cosmo-stm32/examples/oled_example.c`.
 
 ---
 
-## Wiring (Nucleo-L476RG → 128x128 OLED breakout)
+## Wiring — 4-pin I2C OLED → Nucleo-L476RG
 
 ```
-  STM32L476               OLED (4-wire SPI)
-  ─────────               ─────────────────
-  PA5  SPI1_SCK    ───────  CLK / D0 / SCK
-  PA7  SPI1_MOSI   ───────  DIN / D1 / MOSI
-  PA4  GPIO out    ───────  CS    (active LOW)
-  PB0  GPIO out    ───────  DC    (HIGH=data, LOW=cmd)
-  PB1  GPIO out    ───────  RES   (active LOW; module pulls HIGH idle)
-  3V3              ───────  VCC   (most modules; 5V tolerant ones too)
-  GND              ───────  GND
+  OLED          STM32L476  (Nucleo Arduino I2C header)
+  ────          ─────────
+  VCC   ──────  3V3
+  GND   ──────  GND
+  SCL   ──────  PB8  (I2C1_SCL, AF4)   — Nucleo D15
+  SDA   ──────  PB9  (I2C1_SDA, AF4)   — Nucleo D14
 ```
 
-Decoupling: 100 nF + 1 µF ceramic across the OLED VCC/GND right at the
-module. If your panel has a separate `VBAT` pin (charge-pump output) it
-just gets a 1 µF cap to GND — leave it otherwise unconnected. A 100 nF
-across VDD on the STM32 side near the SPI block helps too.
+Most 4-pin OLED breakouts have onboard **4.7k–10k pull-ups** on SDA/SCL,
+so no external pull-ups needed. If yours doesn't (check the back of the
+board), add 4.7k from each line to 3V3.
 
-The `MISO` pin on the OLED footprint (if exposed) is unused in 4-wire mode.
-Don't forget the panel's per-board orientation jumpers if it has them.
+A 100 nF + 1 µF decoupling pair across the module's VCC/GND, right at
+the panel, is good practice.
+
+---
+
+## I2C address
+
+Most 0.96" SSD1306 modules ship at **7-bit address 0x3C** (0x78 in 8-bit
+HAL form). A few have a solder jumper to switch to **0x3D** (0x7A);
+check the back of the board. Override the default by setting
+`cfg.address = (0x3D << 1)` before `oled_init()`.
 
 ---
 
@@ -48,42 +54,25 @@ Don't forget the panel's per-board orientation jumpers if it has them.
 If you regenerate from CubeMX, configure:
 
 **Clock tree.** HSI16 + PLLM=1, PLLN=10, PLLR=DIV2 → 80 MHz SYSCLK,
-voltage scaling 1, Flash latency 4. (Identical to the existing
-`cosmo-stm32/src/main.c` — share the function.)
+voltage scaling 1, Flash latency 4. (Same as the Phase-1 main.c.)
 
-**SPI1 — Full-Duplex Master.**
+**I2C1.**
 ```
-  Mode             : Full-Duplex Master, no NSS
-  Data size        : 8 bits
-  First bit        : MSB
-  Clock polarity   : LOW    (CPOL=0)
-  Clock phase      : 1 Edge (CPHA=0)
-  Prescaler        : 8      (80 MHz / 8 = 10 MHz SCK)
-  CRC              : disabled
-  TI mode          : disabled
+  Mode             : I2C
+  Timing           : 0x10909CEC  (400 kHz @ 80 MHz APB1 clock)
+                      ↳ CubeMX "Timing Configurator" → 400 kHz, FM
+  Analog filter    : enabled
+  Digital filter   : 0
+  General call     : disabled
+  Clock stretching : enabled
 ```
 
-**DMA1 Channel 3 — SPI1_TX.**
-```
-  Direction        : Memory-to-Peripheral
-  Mode             : Normal (not Circular)
-  Increment Memory : enabled
-  Data Width       : Byte / Byte
-  Priority         : Low or Medium
-```
-NVIC: enable `DMA1_Channel3_IRQn` and `SPI1_IRQn`. The global SPI IRQ
-(`SPI1_IRQn`) only needs to be on if you ever use IT-driven small
-transfers; for the bulk DMA path it's optional but harmless.
+**GPIO.** PB8 and PB9 in `GPIO_MODE_AF_OD` (alternate function,
+open-drain), alternate function **AF4** (I2C1), `GPIO_PULLUP` (cheap
+insurance even if the module has pullups), high speed.
 
-**GPIO.** PA4 / PB0 / PB1 as `GPIO_Output`, push-pull, no pull, high-speed.
-Initial states: PA4 high (CS idle), PB0 low (cmd default), PB1 high (RST
-released).
-
-In `HAL_SPI_TxCpltCallback()` (typically in `stm32l4xx_it.c` or your
-`main.c`), call `oled_spi_tx_complete_isr(hspi)` for `hspi->Instance == SPI1`.
-The driver currently waits for `HAL_SPI_GetState() == READY` between pages,
-so the callback isn't strictly required for the synchronous flush path —
-it's wired in for the future fully-async path.
+DMA is optional. The blocking path at 400 kHz takes ~26 ms per full
+flush, well under the 100 ms / 10 Hz animation budget.
 
 ---
 
@@ -91,17 +80,15 @@ it's wired in for the future fully-async path.
 
 ```c
 oled_config_t cfg = {
-    .hspi = &hspi1,
-    .cs_port  = GPIOA, .cs_pin  = GPIO_PIN_4,
-    .dc_port  = GPIOB, .dc_pin  = GPIO_PIN_0,
-    .rst_port = GPIOB, .rst_pin = GPIO_PIN_1,
+    .hi2c    = &hi2c1,
+    .address = OLED_I2C_ADDR_8BIT,   /* 0x78; or (0x3D << 1) for 0x3D modules */
 };
 oled_init(&cfg);
 oled_set_contrast(0xCF);
 
 oled_framebuffer_clear();
 oled_draw_string(8, 8, "Hello, world", OLED_COLOR_WHITE);
-oled_draw_circle(64, 64, 30, /*filled=*/0, OLED_COLOR_WHITE);
+oled_draw_circle(64, 32, 20, /*filled=*/0, OLED_COLOR_WHITE);
 oled_framebuffer_update_display();
 
 /* Or use the high-level state machine: */
@@ -115,97 +102,76 @@ for (uint16_t f = 0; ; ++f) {
 
 ---
 
-## Performance — measured against the spec targets
+## Performance (estimated, 400 kHz I2C)
 
-Measured on STM32L476 @ 80 MHz, SPI1 @ 10 MHz, DMA path enabled.
-
-| Operation                           | Spec target | Actual (typ.)  |
-|-------------------------------------|------------:|---------------:|
-| `oled_init()` end-to-end            | < 100 ms    | ~120 ms (RST delays dominate; see note) |
-| Full framebuffer flush (DMA)        | < 50 ms     | ~2.0 ms        |
-| Full framebuffer flush (blocking)   | < 50 ms     | ~2.5 ms        |
-| `oled_framebuffer_clear()` (memset) | —           | < 50 µs        |
-| `oled_set_pixel()`                  | < 1 µs      | ~0.2 µs        |
-| `oled_draw_char()`                  | < 5 ms      | ~70 µs         |
-| `oled_draw_string("Listening...")`  | —           | ~0.9 ms        |
-| `oled_draw_line(0,0,127,127)`       | —           | ~120 µs        |
-| `oled_draw_circle(r=30, filled)`    | —           | ~250 µs        |
-| Animation tick (clear + redraw + flush) | < 100 ms (10 Hz) | ~3 ms |
+| Operation                           | Typical    |
+|-------------------------------------|-----------:|
+| `oled_init()` end-to-end            | ~55 ms     |
+| Full framebuffer flush              | ~26 ms     |
+| Region flush (e.g. waveform strip)  | ~3–8 ms    |
+| `oled_framebuffer_clear()` (memset) | < 50 µs    |
+| `oled_set_pixel()`                  | ~0.2 µs    |
+| `oled_draw_char()`                  | ~70 µs     |
+| Animation tick (draw + flush)       | ~28 ms     |
 
 Memory:
 
 | Region                              | Bytes |
 |-------------------------------------|------:|
-| Framebuffer (RAM, static)           |  2048 |
-| Driver state                        |    32 |
+| Framebuffer (RAM, static)           |  1024 |
+| Driver state                        |    16 |
 | Font 5x7 (Flash, const)             |   480 |
-| Code, `-Os`                         | ~5800 |
+| Code, `-Os`                         | ~5000 |
 
-Note on init time: 110 ms of the ~120 ms total is the post-reset HAL_Delay.
-The init command sequence itself is ~25 bytes and takes <100 µs over SPI.
+At 400 kHz the bus itself caps full-screen refresh at ~38 Hz. For 10 Hz
+animations the budget is plenty; for faster, use region updates or
+switch to Fast-mode Plus (1 MHz — SSD1306 supports it).
 
 ---
 
-## Testing strategy (matches spec phases)
+## Testing strategy
 
-1. **SPI bring-up.** Run `oled_example.c`, scope CLK/MOSI/CS/DC. Expect
-   ~10 MHz CLK, CS goes low only during transfers, DC matches command vs
-   data phase.
-2. **Init.** After power-up, screen goes from off → solid (briefly) → blank.
-   If it stays solid white: charge pump command (`0x8D 0x14` for SSD1306,
-   `0xAD 0x8B 0x33` for SH1106) didn't take — check controller selection.
-3. **Pattern fill.** `oled_framebuffer_fill()` then flush should give a
-   uniform white panel with no missing rows/columns.
-4. **Per-pixel.** Set the four corners individually; verify pixel-perfect
-   placement (catches off-by-one in the column offset).
-5. **Primitives.** Lines, rect outline+fill, circles. Look for staircase
-   artifacts only on diagonals (Bresenham — expected).
-6. **Text.** Print all 96 glyphs in a 16x6 grid. Check spacing.
-7. **Animation.** Run the example loop, eyeball ≥ 10 Hz frame rate. Toggle
-   a GPIO around `oled_framebuffer_update_display()` and scope it for
-   precise timing.
-8. **Integration.** Drive `oled_display_set_state()` from the dialogue
-   state machine on the ESP32 side via the existing UART link.
+1. **Bus probe.** Pull up SDA/SCL, scope both lines: high (~3V3) idle.
+   `HAL_I2C_IsDeviceReady(&hi2c1, 0x78, 3, 20)` should return `HAL_OK`.
+   If not, address is probably 0x7A or wiring is off.
+2. **Init.** Screen goes from off → briefly solid → blank framebuffer.
+3. **Pattern fill.** `oled_framebuffer_fill()` then flush — uniform
+   white, no missing rows.
+4. **Per-pixel.** Light the four corners individually; check for
+   off-by-one.
+5. **Primitives.** Lines, rect outline+fill, circles.
+6. **Text.** Print all 96 glyphs across the rows.
+7. **Animation.** Cycle states at 10 Hz; verify smooth blinks and orbit.
+8. **Integration.** Drive `oled_display_set_state()` from the ESP32
+   over the existing UART link.
 
 ---
 
 ## Debugging — common issues
 
-| Symptom                                  | Likely cause                                                                 |
-|------------------------------------------|------------------------------------------------------------------------------|
-| Display stays fully black                | RES not toggled; CS held high; charge pump command missing or wrong          |
-| Display fully white "snow" forever       | Init sequence didn't reach `0xAF`; SPI mode wrong (try CPOL=1/CPHA=1 once)   |
-| Image shifted 2 columns right            | SH1106 panel running with `OLED_CONTROLLER_SSD1306` — switch the define      |
-| Top half OK, bottom half garbage / blank | Multiplex ratio still 0x3F (128x64 default) — should be 0x7F for 128x128     |
-| Image upside-down or mirrored            | Swap `0xA1`↔`0xA0` and/or `0xC8`↔`0xC0` in init sequence                     |
-| Tearing during animation                 | Without double-buffering, partial flushes show. Switch to region updates or  |
-|                                          | enable double-buffering (allocate a second 2 KB buffer, ping-pong pointers)  |
-| Slow refresh (>20 ms full screen)        | `OLED_USE_DMA` is 0, or DMA peripheral not enabled in CubeMX                 |
-| Garbled bytes mid-page                   | DMA priority too low and being preempted; raise to High, or disable DCache   |
-| First flush after reset shows old data   | RES was held low too briefly — ensure ≥ 10 ms low + ≥ 100 ms recovery        |
+| Symptom                              | Likely cause                                                          |
+|--------------------------------------|-----------------------------------------------------------------------|
+| `HAL_I2C_IsDeviceReady` fails        | Wrong address (try 0x7A), pullups missing, SDA/SCL swapped            |
+| Display stays fully black            | Init didn't reach `0xAF`, or charge pump cmd (`0x8D 0x14`) lost       |
+| Display fully white "snow"           | Init aborted early — scope SCL, confirm 0xAF is the last command      |
+| Image shows only top 1/8 strip       | Multiplex ratio wrong — should be `0xA8 0x3F` for 128x64              |
+| Image shifted or wrong page          | Page mode leftover — re-issue `0x20 0x00` (horizontal)                |
+| Image mirrored / upside-down         | Swap `0xA1`↔`0xA0` and/or `0xC8`↔`0xC0` in init                       |
+| Garbled bytes during long writes     | Clock-stretching disabled on panel side; lower bus to 100 kHz         |
+| Bus locks up after a glitched write  | Generate 9 SCL pulses with SDA floated, then `HAL_I2C_Init` again     |
 
-Logic-analyzer checklist for first power-on:
+Logic-analyzer checklist:
 
-- CS goes low → DC low → 1 byte (e.g. `0xAE`) → CS high. Pattern repeats
-  for the init sequence with no gaps > a few µs between bytes.
-- After init, one transaction with DC low (3 bytes: page, col-low, col-high)
-  immediately followed by one transaction with DC high (128 bytes). Repeat
-  16 times for a full flush.
-- SCK is clean — no ringing past ~3.3 V on rising edges. If it overshoots,
-  add a 22–33 Ω series resistor on SCK at the STM32 side.
+- One I2C transaction per command/data burst. For a full flush, you
+  see a short cmd burst (`[0x78 W][0x00][0x21 0 127][0x22 0 7][stop]`)
+  immediately followed by a long data burst
+  (`[0x78 W][0x40][1024 bytes][stop]`).
+- The data burst should be one continuous transfer; gaps mean HAL is
+  splitting it (timeout / interrupt priority issues).
 
 ---
 
 ## Build wiring into PlatformIO
-
-The driver lives under `cosmo-stm32/src/display/`. PlatformIO's default
-`build_src_filter` recurses into subdirectories of `src/`, so the files
-will be picked up automatically once the existing `main.c` calls
-`oled_init()` (or you can ignore it on `main` and only exercise the
-driver via the `screendrivers` branch).
-
-To build the standalone demo instead of the Phase-1 UART app, add a second
-env to `platformio.ini`:
 
 ```ini
 [env:nucleo_l476rg_oled_demo]
@@ -215,13 +181,16 @@ build_src_filter = +<display/> +<../examples/oled_example.c>
 
 Then `pio run -e nucleo_l476rg_oled_demo -t upload`.
 
+To use a 128x128 SH1107 module, add `-D OLED_PANEL_128x128_SH1107` to
+`build_flags` and resize the animation coordinates (or leave them — the
+face will appear in the top half).
+
 ---
 
-## Nice-to-haves not yet implemented
+## Not yet implemented
 
-- Double-buffering (would need a second 2 KB buffer; trivial pointer swap)
-- Async DMA flush with a real ISR-driven page chain (currently waits per page)
-- Bitmap-asset face library (faces are drawn from primitives)
-- Anti-aliasing / dithering (no use case at 1 bpp)
-- Scrolling text helper (`0x26`/`0x27` hardware scroll; only works in
-  horizontal-addressing mode on SSD1306)
+- DMA-based flush (would need I2C DMA wired in CubeMX; blocking is
+  fine for the current 10 Hz animation budget)
+- Double-buffering
+- Bitmap-asset face library
+- Hardware scroll (SSD1306 0x26/0x27 — works in this addressing mode)

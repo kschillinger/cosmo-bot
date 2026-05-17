@@ -55,7 +55,7 @@ int main(void)
     printf("\r\n");
     printf("==========================================\r\n");
     printf(" Cosmo Bot — STM32L476RG  Phase 1\r\n");
-    printf(" SYSCLK = %lu Hz\r\n", (unsigned long)HAL_RCC_GetSysClockFreq());
+    printf(" SYreLK = %lu Hz\r\n", (unsigned long)HAL_RCC_GetSysClockFreq());
     printf(" Press B1 (blue button) to send a test\r\n");
     printf(" USER_INPUT to the ESP32-C3.\r\n");
     printf("==========================================\r\n");

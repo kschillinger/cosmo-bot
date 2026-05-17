@@ -1,15 +1,17 @@
 /*
- * oled_display.c — implementation
+ * oled_display.c — I2C implementation for 128x64 SSD1306 (default).
  *
- * Bresenham line + Midpoint circle, page-mode flush, optional DMA.
- * Coordinate system: (0,0) top-left, x right, y down.
+ * Page-mode framebuffer layout (same as the SPI variant):
+ *   buffer[page*OLED_WIDTH + col]  bit (y % 8)  →  pixel (col, page*8 + (y%8))
  *
- * Page-mode framebuffer layout:
- *   buffer[page*128 + col]  bit (y % 8)  →  pixel (col, page*8 + (y%8))
+ * I2C transport: HAL_I2C_Mem_Write with the OLED's "control byte" as the
+ * 1-byte memory address:
+ *   - 0x00  →  payload is a stream of commands
+ *   - 0x40  →  payload is a stream of pixel data
  *
- * Bit 0 is the topmost pixel of the page, bit 7 is the bottommost. This is
- * the SSD1306/SH1106 native layout, which means flushing is a straight memcpy
- * from buffer to controller GDDRAM — no per-pixel transposition needed.
+ * Full framebuffer flush uses SSD1306 horizontal addressing mode: one
+ * command burst sets the column/page range, then a single data burst
+ * dumps the entire framebuffer. At 400 kHz this is ~26 ms per full flush.
  */
 
 #include "oled_display.h"
@@ -24,165 +26,138 @@ static oled_config_t      s_cfg;
 static oled_framebuffer_t s_fb;
 
 /* ========================================================================== */
-/*  Internal helpers                                                          */
+/*  Internal — I2C primitives                                                 */
 /* ========================================================================== */
 
-static inline void cs_low(void)   { HAL_GPIO_WritePin(s_cfg.cs_port,  s_cfg.cs_pin,  GPIO_PIN_RESET); }
-static inline void cs_high(void)  { HAL_GPIO_WritePin(s_cfg.cs_port,  s_cfg.cs_pin,  GPIO_PIN_SET);   }
-static inline void dc_low(void)   { HAL_GPIO_WritePin(s_cfg.dc_port,  s_cfg.dc_pin,  GPIO_PIN_RESET); }
-static inline void dc_high(void)  { HAL_GPIO_WritePin(s_cfg.dc_port,  s_cfg.dc_pin,  GPIO_PIN_SET);   }
-static inline void rst_low(void)  { HAL_GPIO_WritePin(s_cfg.rst_port, s_cfg.rst_pin, GPIO_PIN_RESET); }
-static inline void rst_high(void) { HAL_GPIO_WritePin(s_cfg.rst_port, s_cfg.rst_pin, GPIO_PIN_SET);   }
-
-static oled_status_t spi_write_blocking(const uint8_t *data, uint16_t len)
+static oled_status_t i2c_write_cmd_byte(uint8_t cmd)
 {
-    HAL_StatusTypeDef st = HAL_SPI_Transmit(s_cfg.hspi, (uint8_t *)data,
-                                            len, OLED_SPI_TIMEOUT_MS);
-    return (st == HAL_OK) ? OLED_OK : OLED_ERR_SPI_FAIL;
+    HAL_StatusTypeDef st = HAL_I2C_Mem_Write(
+        s_cfg.hi2c, s_cfg.address,
+        0x00, I2C_MEMADD_SIZE_8BIT,
+        &cmd, 1, OLED_I2C_TIMEOUT_MS);
+    return (st == HAL_OK) ? OLED_OK : OLED_ERR_I2C_FAIL;
 }
 
-static oled_status_t oled_write_command(uint8_t cmd)
+static oled_status_t i2c_write_cmd_list(const uint8_t *cmds, uint16_t len)
 {
-    cs_low();
-    dc_low();
-    oled_status_t s = spi_write_blocking(&cmd, 1);
-    cs_high();
-    return s;
+    HAL_StatusTypeDef st = HAL_I2C_Mem_Write(
+        s_cfg.hi2c, s_cfg.address,
+        0x00, I2C_MEMADD_SIZE_8BIT,
+        (uint8_t *)cmds, len, OLED_I2C_TIMEOUT_MS);
+    return (st == HAL_OK) ? OLED_OK : OLED_ERR_I2C_FAIL;
 }
 
-static oled_status_t oled_write_command2(uint8_t cmd, uint8_t arg)
+static oled_status_t i2c_write_data(const uint8_t *data, uint16_t len)
 {
-    uint8_t buf[2] = { cmd, arg };
-    cs_low();
-    dc_low();
-    oled_status_t s = spi_write_blocking(buf, 2);
-    cs_high();
-    return s;
-}
-
-static oled_status_t oled_write_data(const uint8_t *data, uint16_t len)
-{
-    cs_low();
-    dc_high();
-    oled_status_t s = spi_write_blocking(data, len);
-    cs_high();
-    return s;
+    HAL_StatusTypeDef st = HAL_I2C_Mem_Write(
+        s_cfg.hi2c, s_cfg.address,
+        0x40, I2C_MEMADD_SIZE_8BIT,
+        (uint8_t *)data, len, OLED_I2C_TIMEOUT_MS);
+    return (st == HAL_OK) ? OLED_OK : OLED_ERR_I2C_FAIL;
 }
 
 /* ========================================================================== */
-/*  Layer 2 — Init / control                                                  */
+/*  Layer 2 — init / control                                                  */
 /* ========================================================================== */
 
 oled_status_t oled_init(const oled_config_t *cfg)
 {
-    if (!cfg || !cfg->hspi) return OLED_ERR_PARAM;
+    if (!cfg || !cfg->hi2c) return OLED_ERR_PARAM;
     s_cfg = *cfg;
+    if (s_cfg.address == 0) s_cfg.address = OLED_I2C_ADDR_8BIT;
 
-    /* Hardware reset: low ≥ 3 µs, then high ≥ 100 µs.
-     * We use generous delays so this works on any board.                  */
-    cs_high();
-    dc_high();
-    rst_high();
-    HAL_Delay(1);
-    rst_low();
-    HAL_Delay(10);
-    rst_high();
-    HAL_Delay(100);
+    /* Small power-on settle before talking. */
+    HAL_Delay(50);
+
+    /* Confirm the panel is on the bus before sending the long init. */
+    if (HAL_I2C_IsDeviceReady(s_cfg.hi2c, s_cfg.address, 3, 20) != HAL_OK) {
+        return OLED_ERR_I2C_FAIL;
+    }
 
 #ifdef OLED_CONTROLLER_SSD1306
-    /* SSD1306 init for 128x128 (multiplex 0x7F).
-     * Standard SSD1306 is 128x64; if you have a 128x128 panel using an
-     * SSD1306-compatible controller (some are actually SSD1327/SH1107),
-     * the multiplex/COM-pin bytes below get you a usable image and
-     * SH1106 mode is the safer fallback if you see column shift.        */
+    /* SSD1306 128x64 init. */
     static const uint8_t init_seq[] = {
-        0xAE,             /* display OFF                                  */
-        0xD5, 0x80,       /* clock divide ratio / oscillator freq         */
-        0xA8, 0x7F,       /* multiplex ratio = 127 (128 rows)             */
-        0xD3, 0x00,       /* display offset = 0                           */
-        0x40,             /* start line = 0                               */
-        0x8D, 0x14,       /* charge pump ON (internal)                    */
-        0x20, 0x02,       /* page addressing mode                         */
-        0xA1,             /* segment remap (X flip)                       */
-        0xC8,             /* COM scan dir remap (Y flip)                  */
-        0xDA, 0x12,       /* COM pins: alternative, no remap              */
-        0x81, 0xCF,       /* contrast                                     */
-        0xD9, 0xF1,       /* precharge                                    */
-        0xDB, 0x40,       /* VCOMH deselect                               */
-        0xA4,             /* output follows RAM (not all-on)              */
-        0xA6,             /* normal (non-inverted) display                */
-        0x2E,             /* deactivate scroll                            */
-        0xAF              /* display ON                                   */
+        0xAE,             /* display OFF                                 */
+        0xD5, 0x80,       /* clock divide / oscillator                   */
+        0xA8, 0x3F,       /* multiplex ratio = 63 (64 rows)              */
+        0xD3, 0x00,       /* display offset = 0                          */
+        0x40,             /* start line = 0                              */
+        0x8D, 0x14,       /* charge pump ON (internal)                   */
+        0x20, 0x00,       /* horizontal addressing mode                  */
+        0xA1,             /* segment remap (X flip)                      */
+        0xC8,             /* COM scan dir remap (Y flip)                 */
+        0xDA, 0x12,       /* COM pins: alternative, no remap             */
+        0x81, 0xCF,       /* contrast                                    */
+        0xD9, 0xF1,       /* precharge                                   */
+        0xDB, 0x40,       /* VCOMH deselect                              */
+        0xA4,             /* output follows RAM (not all-on)             */
+        0xA6,             /* normal (non-inverted) display               */
+        0x2E,             /* deactivate scroll                           */
+        0xAF              /* display ON                                  */
     };
-#else /* OLED_CONTROLLER_SH1106 */
+#else /* OLED_CONTROLLER_SH1107 — 128x128 */
     static const uint8_t init_seq[] = {
         0xAE,
-        0xD5, 0x80,
-        0xA8, 0x7F,
+        0xD5, 0x51,
+        0xA8, 0x7F,       /* multiplex ratio = 127 (128 rows)            */
         0xD3, 0x00,
-        0x40,
-        0xAD, 0x8B,       /* SH1106 charge pump enable (different cmd)    */
-        0x33,             /* pump voltage = 9.0V                          */
-        /* SH1106 has no horizontal/vertical addressing — page-only.     */
+        0xDC, 0x00,       /* display start line = 0                      */
+        0xAD, 0x8B,       /* charge pump                                 */
+        0x20, 0x00,
         0xA1,
         0xC8,
         0xDA, 0x12,
-        0x81, 0xCF,
-        0xD9, 0xF1,
-        0xDB, 0x40,
+        0x81, 0x80,
+        0xD9, 0x22,
+        0xDB, 0x35,
         0xA4,
         0xA6,
-        0x2E,
         0xAF
     };
 #endif
 
-    cs_low();
-    dc_low();
-    oled_status_t s = spi_write_blocking(init_seq, sizeof(init_seq));
-    cs_high();
+    oled_status_t s = i2c_write_cmd_list(init_seq, sizeof(init_seq));
     if (s != OLED_OK) return s;
 
-    /* Blank the framebuffer and push it before declaring init done.       */
+    /* Blank framebuffer and push. */
     memset(s_fb.buffer, 0x00, OLED_FRAMEBUFFER_SIZE);
     s_fb.dirty       = 0;
     s_fb.busy        = 0;
     s_fb.initialized = 1;
-
-    /* Force a full flush via the public path (which validates state).    */
-    s_fb.dirty = 1;
+    s_fb.dirty       = 1;
     return oled_framebuffer_update_display();
 }
 
 oled_status_t oled_set_contrast(uint8_t contrast)
 {
     if (!s_fb.initialized) return OLED_ERR_NOT_INIT;
-    return oled_write_command2(0x81, contrast);
+    uint8_t cmds[2] = { 0x81, contrast };
+    return i2c_write_cmd_list(cmds, 2);
 }
 
 oled_status_t oled_power_on(void)
 {
     if (!s_fb.initialized) return OLED_ERR_NOT_INIT;
-    return oled_write_command(0xAF);
+    return i2c_write_cmd_byte(0xAF);
 }
 
 oled_status_t oled_power_off(void)
 {
     if (!s_fb.initialized) return OLED_ERR_NOT_INIT;
-    return oled_write_command(0xAE);
+    return i2c_write_cmd_byte(0xAE);
 }
 
 oled_status_t oled_invert_display(uint8_t invert)
 {
     if (!s_fb.initialized) return OLED_ERR_NOT_INIT;
-    return oled_write_command(invert ? 0xA7 : 0xA6);
+    return i2c_write_cmd_byte(invert ? 0xA7 : 0xA6);
 }
 
 uint8_t oled_is_initialized(void) { return s_fb.initialized; }
 uint8_t oled_is_busy(void)        { return s_fb.busy;        }
 
 /* ========================================================================== */
-/*  Layer 3 — Framebuffer                                                     */
+/*  Layer 3 — framebuffer                                                     */
 /* ========================================================================== */
 
 void oled_framebuffer_clear(void)
@@ -216,7 +191,7 @@ void oled_set_pixel(int16_t x, int16_t y, uint8_t color)
 uint8_t oled_get_pixel(int16_t x, int16_t y)
 {
     if ((unsigned)x >= OLED_WIDTH || (unsigned)y >= OLED_HEIGHT) return 0;
-    const uint16_t idx  = (uint16_t)((y >> 3) * OLED_WIDTH + x);
+    const uint16_t idx = (uint16_t)((y >> 3) * OLED_WIDTH + x);
     return (s_fb.buffer[idx] >> (y & 7)) & 1u;
 }
 
@@ -224,93 +199,27 @@ const uint8_t *oled_framebuffer_raw(void) { return s_fb.buffer; }
 
 /* ---- Flush helpers ------------------------------------------------------- */
 
-static oled_status_t flush_page_range(uint8_t first_page, uint8_t last_page,
-                                      uint8_t col_start,  uint8_t col_end)
+static oled_status_t set_window(uint8_t x1, uint8_t x2, uint8_t p1, uint8_t p2)
 {
-    if (col_start >= OLED_WIDTH || col_end >= OLED_WIDTH || col_start > col_end)
-        return OLED_ERR_PARAM;
-    if (first_page >= OLED_PAGES || last_page >= OLED_PAGES || first_page > last_page)
-        return OLED_ERR_PARAM;
-
-    const uint16_t span = (uint16_t)(col_end - col_start + 1);
-
-    for (uint8_t page = first_page; page <= last_page; ++page) {
-        const uint8_t col_phys = (uint8_t)(col_start + OLED_COL_OFFSET);
-        uint8_t cmd[3] = {
-            (uint8_t)(0xB0 | page),               /* set page              */
-            (uint8_t)(0x00 | (col_phys & 0x0F)),  /* col low nibble        */
-            (uint8_t)(0x10 | (col_phys >> 4))     /* col high nibble       */
-        };
-        cs_low();
-        dc_low();
-        if (spi_write_blocking(cmd, 3) != OLED_OK) { cs_high(); return OLED_ERR_SPI_FAIL; }
-        cs_high();
-
-        cs_low();
-        dc_high();
-        oled_status_t s = spi_write_blocking(&s_fb.buffer[page * OLED_WIDTH + col_start], span);
-        cs_high();
-        if (s != OLED_OK) return s;
-    }
-    return OLED_OK;
+    uint8_t cmds[6] = {
+        0x21, x1, x2,     /* column address range                        */
+        0x22, p1, p2      /* page address range                          */
+    };
+    return i2c_write_cmd_list(cmds, 6);
 }
-
-/* DMA flush — pushes the entire framebuffer page-by-page. We submit page 0
- * synchronously to set the address, then the data via HAL_SPI_Transmit_DMA.
- * The completion ISR drives the next page. For simplicity here we expose
- * a synchronous-looking call that uses DMA per page and waits.            */
-#if OLED_USE_DMA
-static volatile uint8_t s_dma_done;
-
-static oled_status_t flush_full_dma(void)
-{
-    s_fb.busy = 1;
-
-    for (uint8_t page = 0; page < OLED_PAGES; ++page) {
-        uint8_t cmd[3] = {
-            (uint8_t)(0xB0 | page),
-            (uint8_t)(0x00 | (OLED_COL_OFFSET & 0x0F)),
-            (uint8_t)(0x10 | (OLED_COL_OFFSET >> 4))
-        };
-        cs_low();
-        dc_low();
-        if (spi_write_blocking(cmd, 3) != OLED_OK) { cs_high(); s_fb.busy = 0; return OLED_ERR_SPI_FAIL; }
-        cs_high();
-
-        cs_low();
-        dc_high();
-        s_dma_done = 0;
-        if (HAL_SPI_Transmit_DMA(s_cfg.hspi,
-                                 &s_fb.buffer[page * OLED_WIDTH],
-                                 OLED_WIDTH) != HAL_OK) {
-            cs_high();
-            s_fb.busy = 0;
-            return OLED_ERR_SPI_FAIL;
-        }
-        /* Wait for DMA. Safe even without ISR plumbing — HAL state is OK. */
-        uint32_t t0 = HAL_GetTick();
-        while (HAL_SPI_GetState(s_cfg.hspi) != HAL_SPI_STATE_READY) {
-            if (HAL_GetTick() - t0 > 50) { cs_high(); s_fb.busy = 0; return OLED_ERR_SPI_FAIL; }
-        }
-        cs_high();
-    }
-
-    s_fb.busy = 0;
-    return OLED_OK;
-}
-#endif
 
 oled_status_t oled_framebuffer_update_display(void)
 {
     if (!s_fb.initialized) return OLED_ERR_NOT_INIT;
     if (!s_fb.dirty)       return OLED_OK;
 
-#if OLED_USE_DMA
-    oled_status_t s = flush_full_dma();
-#else
-    oled_status_t s = flush_page_range(0, OLED_PAGES - 1, 0, OLED_WIDTH - 1);
-#endif
+    s_fb.busy = 1;
+    oled_status_t s = set_window(0, OLED_WIDTH - 1, 0, OLED_PAGES - 1);
+    if (s != OLED_OK) { s_fb.busy = 0; return s; }
+
+    s = i2c_write_data(s_fb.buffer, OLED_FRAMEBUFFER_SIZE);
     if (s == OLED_OK) s_fb.dirty = 0;
+    s_fb.busy = 0;
     return s;
 }
 
@@ -318,23 +227,27 @@ oled_status_t oled_framebuffer_update_region(uint8_t x1, uint8_t y1,
                                              uint8_t x2, uint8_t y2)
 {
     if (!s_fb.initialized) return OLED_ERR_NOT_INIT;
-    /* Page-mode means the smallest vertical unit is a page (8 rows).
-     * Round y1 down and y2 up to page boundaries.                          */
-    const uint8_t p1 = (uint8_t)(y1 >> 3);
-    const uint8_t p2 = (uint8_t)(y2 >> 3);
-    return flush_page_range(p1, p2, x1, x2);
-}
+    if (x1 > x2 || y1 > y2) return OLED_ERR_PARAM;
+    if (x2 >= OLED_WIDTH || y2 >= OLED_HEIGHT) return OLED_ERR_PARAM;
 
-/* ISR — keep for future fully-async path. Currently unused but exposed.   */
-void oled_spi_tx_complete_isr(void)
-{
-#if OLED_USE_DMA
-    s_dma_done = 1;
-#endif
+    const uint8_t  p1   = (uint8_t)(y1 >> 3);
+    const uint8_t  p2   = (uint8_t)(y2 >> 3);
+    const uint16_t span = (uint16_t)(x2 - x1 + 1);
+
+    /* Send each page as its own (set-window + data) pair — the bytes for
+     * a region aren't contiguous in the framebuffer since each page has
+     * OLED_WIDTH bytes but we only want `span` of them.                   */
+    for (uint8_t p = p1; p <= p2; ++p) {
+        oled_status_t s = set_window(x1, x2, p, p);
+        if (s != OLED_OK) return s;
+        s = i2c_write_data(&s_fb.buffer[p * OLED_WIDTH + x1], span);
+        if (s != OLED_OK) return s;
+    }
+    return OLED_OK;
 }
 
 /* ========================================================================== */
-/*  Layer 4 — Graphics primitives                                             */
+/*  Layer 4 — primitives                                                      */
 /* ========================================================================== */
 
 void oled_draw_pixel(int16_t x, int16_t y, uint8_t color)
@@ -396,7 +309,7 @@ void oled_draw_rect(int16_t x, int16_t y, int16_t w, int16_t h,
     }
 }
 
-/* Midpoint circle — Bresenham's variant. 8-fold symmetry, integer-only. */
+/* Midpoint circle — Bresenham's variant. 8-fold symmetry. */
 static void plot_circle_points(int16_t cx, int16_t cy,
                                int16_t x,  int16_t y, uint8_t color)
 {
@@ -421,7 +334,6 @@ void oled_draw_circle(int16_t cx, int16_t cy, int16_t r,
 
     while (x <= y) {
         if (filled) {
-            /* Two horizontal scanlines per step covers the disk.        */
             oled_draw_hline((int16_t)(cx - x), (int16_t)(cy + y), (int16_t)(2*x + 1), color);
             oled_draw_hline((int16_t)(cx - x), (int16_t)(cy - y), (int16_t)(2*x + 1), color);
             oled_draw_hline((int16_t)(cx - y), (int16_t)(cy + x), (int16_t)(2*y + 1), color);
@@ -440,7 +352,6 @@ void oled_draw_circle(int16_t cx, int16_t cy, int16_t r,
     }
 }
 
-/* Text rendering — column-major 5x7 font, each char drawn into a 6x8 cell. */
 void oled_draw_char(int16_t x, int16_t y, char c, uint8_t color)
 {
     if (c < FONT_5X7_FIRST_CHAR || c > FONT_5X7_LAST_CHAR) c = '?';
@@ -451,12 +362,9 @@ void oled_draw_char(int16_t x, int16_t y, char c, uint8_t color)
         for (uint8_t row = 0; row < 7; ++row) {
             if (bits & (1u << row)) {
                 oled_set_pixel((int16_t)(x + col), (int16_t)(y + row), color);
-            } else if (color == OLED_COLOR_INVERT) {
-                /* invert mode also flips background — caller's intent.    */
             }
         }
     }
-    /* The 6th column and 8th row stay blank → natural inter-glyph gap.    */
 }
 
 void oled_draw_string(int16_t x, int16_t y, const char *s, uint8_t color)
@@ -483,7 +391,6 @@ uint16_t oled_measure_string(const char *s)
     return (line > w) ? line : w;
 }
 
-/* Word-wrap on whitespace. Words longer than max_width are hard-broken. */
 void oled_draw_string_wrapped(int16_t x, int16_t y, int16_t max_width,
                               const char *s, uint8_t color)
 {
@@ -494,23 +401,19 @@ void oled_draw_string_wrapped(int16_t x, int16_t y, int16_t max_width,
     const int16_t right = (int16_t)(x + max_width);
 
     while (*s) {
-        /* Skip leading run of spaces at the start of a wrapped line.      */
         while (*s == ' ' && cx == x) ++s;
         if (!*s) break;
 
-        /* Find the next word boundary.                                    */
         const char *word = s;
         while (*s && *s != ' ' && *s != '\n') ++s;
         const int16_t word_px = (int16_t)((s - word) * OLED_FONT_W);
 
         if (cx != x && cx + word_px > right) {
-            /* Wrap before the word.                                       */
             cx = x;
             cy = (int16_t)(cy + OLED_FONT_H);
         }
 
         if (word_px > max_width) {
-            /* Hard-break: render until edge, wrap, repeat.                */
             for (const char *p = word; p < s; ++p) {
                 if (cx + OLED_FONT_W > right) {
                     cx = x;
@@ -527,9 +430,7 @@ void oled_draw_string_wrapped(int16_t x, int16_t y, int16_t max_width,
         }
 
         if (*s == ' ') {
-            if (cx + OLED_FONT_W <= right) {
-                cx = (int16_t)(cx + OLED_FONT_W);
-            }
+            if (cx + OLED_FONT_W <= right) cx = (int16_t)(cx + OLED_FONT_W);
             ++s;
         } else if (*s == '\n') {
             cx = x;
@@ -539,7 +440,6 @@ void oled_draw_string_wrapped(int16_t x, int16_t y, int16_t max_width,
     }
 }
 
-/* Bitmap layout: row-major, 1 bpp, MSB first per byte, padded to byte/row. */
 void oled_draw_bitmap(int16_t x, int16_t y, int16_t w, int16_t h,
                       const uint8_t *bitmap, uint8_t color)
 {
