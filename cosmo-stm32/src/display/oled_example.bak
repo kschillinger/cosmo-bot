@@ -1,0 +1,181 @@
+/*
+ * oled_example.c — standalone bring-up demo for the I2C OLED driver.
+ *
+ * Add to platformio.ini:
+ *   [env:nucleo_l476rg_oled_demo]
+ *   extends         = env:nucleo_l476rg
+ *   build_src_filter = +<display/> +<../examples/oled_example.c>
+ *
+ * Cycles IDLE → LISTENING → PROCESSING → RESPONDING with realistic
+ * timing, then loops.
+ *
+ * Pin map:
+ *   I2C1_SCL  PB8  (AF4, open-drain)   — Nucleo D15
+ *   I2C1_SDA  PB9  (AF4, open-drain)   — Nucleo D14
+ */
+
+#include "stm32l4xx_hal.h"
+#include "display/oled_display.h"
+
+#include <math.h>
+
+I2C_HandleTypeDef hi2c1;
+
+static void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_I2C1_Init(void);
+
+#define DEMO_SAMPLES 128
+static uint16_t demo_audio[DEMO_SAMPLES];
+
+static void fill_demo_waveform(uint16_t phase)
+{
+    for (uint16_t i = 0; i < DEMO_SAMPLES; ++i) {
+        float t   = (float)(i + phase) * 0.10f;
+        float amp = 0.4f + 0.4f * sinf((float)phase * 0.05f);
+        float v   = amp * (sinf(t) + 0.5f * sinf(2.7f * t));
+        int32_t s = (int32_t)(32768.0f + v * 18000.0f);
+        if (s < 0)     s = 0;
+        if (s > 65535) s = 65535;
+        demo_audio[i] = (uint16_t)s;
+    }
+}
+
+int main(void)
+{
+    HAL_Init();
+    SystemClock_Config();
+    MX_GPIO_Init();
+    MX_I2C1_Init();
+
+    oled_config_t cfg = {
+        .hi2c    = &hi2c1,
+        .address = OLED_I2C_ADDR_8BIT,   /* 0x78 — change to (0x3D << 1) if your module is at 0x3D */
+    };
+
+    if (oled_init(&cfg) != OLED_OK) {
+        /* Slow heartbeat on LD2 so we know we're alive but the OLED isn't. */
+        while (1) { HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5); HAL_Delay(200); }
+    }
+
+    oled_set_contrast(0xCF);
+
+    uint16_t frame = 0;
+    for (;;) {
+        /* IDLE — 3 s @ 10 Hz */
+        oled_display_set_state(DISPLAY_STATE_IDLE);
+        for (int i = 0; i < 30; ++i) {
+            oled_update_animation_frame(frame++);
+            oled_framebuffer_update_display();
+            HAL_Delay(100);
+        }
+
+        /* LISTENING — 3 s, refresh waveform every frame */
+        oled_display_set_state(DISPLAY_STATE_LISTENING);
+        for (int i = 0; i < 30; ++i) {
+            fill_demo_waveform(frame);
+            oled_display_listening(demo_audio, DEMO_SAMPLES);
+            oled_framebuffer_update_display();
+            HAL_Delay(100);
+            ++frame;
+        }
+
+        /* PROCESSING — 3 s */
+        oled_display_set_state(DISPLAY_STATE_PROCESSING);
+        for (int i = 0; i < 30; ++i) {
+            oled_update_animation_frame(frame++);
+            oled_framebuffer_update_display();
+            HAL_Delay(100);
+        }
+
+        /* RESPONDING — 5 s */
+        oled_display_set_state(DISPLAY_STATE_RESPONDING);
+        for (int i = 0; i < 50; ++i) {
+            oled_display_responding(
+                "Sure! The capital of France is Paris.",
+                frame++);
+            oled_framebuffer_update_display();
+            HAL_Delay(100);
+        }
+    }
+}
+
+/* ========================================================================== */
+/*  HAL glue (minimal — would normally be CubeMX-generated)                   */
+/* ========================================================================== */
+
+static void SystemClock_Config(void)
+{
+    RCC_OscInitTypeDef osc = {0};
+    RCC_ClkInitTypeDef clk = {0};
+
+    __HAL_RCC_PWR_CLK_ENABLE();
+    HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1);
+
+    osc.OscillatorType      = RCC_OSCILLATORTYPE_HSI;
+    osc.HSIState            = RCC_HSI_ON;
+    osc.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+    osc.PLL.PLLState        = RCC_PLL_ON;
+    osc.PLL.PLLSource       = RCC_PLLSOURCE_HSI;
+    osc.PLL.PLLM            = 1;
+    osc.PLL.PLLN            = 10;
+    osc.PLL.PLLP            = RCC_PLLP_DIV7;
+    osc.PLL.PLLQ            = RCC_PLLQ_DIV2;
+    osc.PLL.PLLR            = RCC_PLLR_DIV2;
+    HAL_RCC_OscConfig(&osc);
+
+    clk.ClockType      = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
+                       | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    clk.SYSCLKSource   = RCC_SYSCLKSOURCE_PLLCLK;
+    clk.AHBCLKDivider  = RCC_SYSCLK_DIV1;
+    clk.APB1CLKDivider = RCC_HCLK_DIV1;
+    clk.APB2CLKDivider = RCC_HCLK_DIV1;
+    HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_4);
+}
+
+static void MX_GPIO_Init(void)
+{
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+
+    GPIO_InitTypeDef g = {0};
+
+    /* LD2 on PA5 for the fallback heartbeat. */
+    g.Pin   = GPIO_PIN_5;
+    g.Mode  = GPIO_MODE_OUTPUT_PP;
+    g.Pull  = GPIO_NOPULL;
+    g.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOA, &g);
+}
+
+static void MX_I2C1_Init(void)
+{
+    __HAL_RCC_I2C1_CLK_ENABLE();
+
+    /* PB8 = SCL, PB9 = SDA, both AF4, open-drain, pullup. */
+    GPIO_InitTypeDef g = {0};
+    g.Pin       = GPIO_PIN_8 | GPIO_PIN_9;
+    g.Mode      = GPIO_MODE_AF_OD;
+    g.Pull      = GPIO_PULLUP;
+    g.Speed     = GPIO_SPEED_FREQ_HIGH;
+    g.Alternate = GPIO_AF4_I2C1;
+    HAL_GPIO_Init(GPIOB, &g);
+
+    hi2c1.Instance              = I2C1;
+    /* Timing for 400 kHz Fast-mode at 80 MHz APB1 (PCLK1). Value from
+     * the CubeMX timing calculator. If you change the system clock,
+     * regenerate this constant.                                          */
+    hi2c1.Init.Timing           = 0x10909CEC;
+    hi2c1.Init.OwnAddress1      = 0;
+    hi2c1.Init.AddressingMode   = I2C_ADDRESSINGMODE_7BIT;
+    hi2c1.Init.DualAddressMode  = I2C_DUALADDRESS_DISABLE;
+    hi2c1.Init.OwnAddress2      = 0;
+    hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
+    hi2c1.Init.GeneralCallMode  = I2C_GENERALCALL_DISABLE;
+    hi2c1.Init.NoStretchMode    = I2C_NOSTRETCH_DISABLE;
+    HAL_I2C_Init(&hi2c1);
+
+    /* Analog filter on, digital filter off. */
+    HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE);
+    HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0);
+}
