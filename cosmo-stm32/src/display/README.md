@@ -2,8 +2,8 @@
 
 128x64 (default) monochrome OLED driver for the cosmo-bot, targeting
 **STM32L476** at 80 MHz, **I2C1 @ 400 kHz**, horizontal addressing mode.
-Compatible with **SSD1306** (default, 128x64) — flip a define for
-**SH1107** (128x128).
+Compatible with **SSD1306** (default, 128x64). Support is also included for
+**SH1106** (128x64) and **SH1107** (128x128) via build flags.
 
 This is the I2C-compatible companion to the SPI driver on the
 `screendrivers` branch.
@@ -27,8 +27,8 @@ Standalone bring-up demo: `cosmo-stm32/examples/oled_example.c`.
   ────          ─────────
   VCC   ──────  3V3
   GND   ──────  GND
-  SCL   ──────  PB8  (I2C1_SCL, AF4)   — Nucleo D15
-  SDA   ──────  PB9  (I2C1_SDA, AF4)   — Nucleo D14
+  SCL   ──────  PB8  (I2C1_SCL, AF4)   — Nucleo D15  [primary]
+  SDA   ──────  PB9  (I2C1_SDA, AF4)   — Nucleo D14  [primary]
 ```
 
 Most 4-pin OLED breakouts have onboard **4.7k–10k pull-ups** on SDA/SCL,
@@ -37,6 +37,9 @@ board), add 4.7k from each line to 3V3.
 
 A 100 nF + 1 µF decoupling pair across the module's VCC/GND, right at
 the panel, is good practice.
+
+If no ACK is found on PB8/PB9, the demo firmware automatically retries
+the alternate I2C1 pin pair **PB6/PB7** (Nucleo D10/D9).
 
 ---
 
@@ -152,6 +155,7 @@ switch to Fast-mode Plus (1 MHz — SSD1306 supports it).
 | Symptom                              | Likely cause                                                          |
 |--------------------------------------|-----------------------------------------------------------------------|
 | `HAL_I2C_IsDeviceReady` fails        | Wrong address (try 0x7A), pullups missing, SDA/SCL swapped            |
+| No ACK on PB8/PB9                    | Try PB6/PB7 (D10/D9) — demo firmware now retries automatically        |
 | Display stays fully black            | Init didn't reach `0xAF`, or charge pump cmd (`0x8D 0x14`) lost       |
 | Display fully white "snow"           | Init aborted early — scope SCL, confirm 0xAF is the last command      |
 | Image shows only top 1/8 strip       | Multiplex ratio wrong — should be `0xA8 0x3F` for 128x64              |
@@ -180,6 +184,12 @@ build_src_filter = +<display/> +<../examples/oled_example.c>
 ```
 
 Then `pio run -e nucleo_l476rg_oled_demo -t upload`.
+
+For SH1106 128x64 modules, add:
+
+```
+-D OLED_PANEL_128x64_SH1106
+```
 
 To use a 128x128 SH1107 module, add `-D OLED_PANEL_128x128_SH1107` to
 `build_flags` and resize the animation coordinates (or leave them — the

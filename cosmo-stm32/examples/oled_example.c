@@ -1,24 +1,16 @@
 /*
- * oled_example.c — standalone bring-up demo for the OLED driver.
+ * oled_example.c — standalone bring-up demo for the I2C OLED driver.
  *
- * NOT compiled by the default cosmo-stm32 PlatformIO build; copy into main.c
- * (or add a separate [env:nucleo_l476rg_oled_demo] env in platformio.ini that
- * sets `build_src_filter = +<*.c> -<main.c> +<../examples/oled_example/oled_example.c>`)
- * to run it.
+ * Add to platformio.ini:
+ *   [env:nucleo_l476rg_oled_demo]
+ *   build_src_filter = +<display/> +<../examples/oled_example.c> -<main.c>
  *
- * Demo cycles through the four runtime display states with realistic timing:
- *   IDLE       → 3 s
- *   LISTENING  → 3 s (synthetic sine waveform)
- *   PROCESSING → 3 s
- *   RESPONDING → 5 s
- * ...then loops.
+ * Cycles IDLE → LISTENING → PROCESSING → RESPONDING with realistic
+ * timing, then loops.
  *
- * Pin map (matches the wiring diagram in display/README.md):
- *   SPI1_SCK   PA5
- *   SPI1_MOSI  PA7
- *   OLED_CS    PA4   (active LOW)
- *   OLED_DC    PB0   (HIGH=data, LOW=cmd)
- *   OLED_RST   PB1   (active LOW)
+ * Pin map:
+ *   I2C1_SCL  PB8  (AF4, open-drain)   — Nucleo D15
+ *   I2C1_SDA  PB9  (AF4, open-drain)   — Nucleo D14
  */
 
 #include "stm32l4xx_hal.h"
@@ -26,21 +18,15 @@
 
 #include <math.h>
 
-/* ========================================================================== */
-/*  CubeMX-style handles (declare here for a self-contained example).         */
-/* ========================================================================== */
-
-SPI_HandleTypeDef hspi1;
-DMA_HandleTypeDef hdma_spi1_tx;
+I2C_HandleTypeDef hi2c1;
 
 static void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_DMA_Init(void);
-static void MX_SPI1_Init(void);
+static void MX_I2C1_Init(void);
 
-/* ========================================================================== */
-/*  Synthetic waveform for the listening demo                                 */
-/* ========================================================================== */
+#define LED_PULSE_CYCLES 20000000u
+#define LED_SLOW_CYCLES  40000000u
+#define LED_MED_CYCLES   15000000u
 
 #define DEMO_SAMPLES 128
 static uint16_t demo_audio[DEMO_SAMPLES];
@@ -48,95 +34,125 @@ static uint16_t demo_audio[DEMO_SAMPLES];
 static void fill_demo_waveform(uint16_t phase)
 {
     for (uint16_t i = 0; i < DEMO_SAMPLES; ++i) {
-        /* Two-tone sine, slowly modulated in amplitude.                  */
-        float t = (float)(i + phase) * 0.10f;
+        float t   = (float)(i + phase) * 0.10f;
         float amp = 0.4f + 0.4f * sinf((float)phase * 0.05f);
-        float v = amp * (sinf(t) + 0.5f * sinf(2.7f * t));
+        float v   = amp * (sinf(t) + 0.5f * sinf(2.7f * t));
         int32_t s = (int32_t)(32768.0f + v * 18000.0f);
-        if (s < 0)      s = 0;
-        if (s > 65535)  s = 65535;
+        if (s < 0)     s = 0;
+        if (s > 65535) s = 65535;
         demo_audio[i] = (uint16_t)s;
     }
 }
 
-/* ========================================================================== */
-/*  Main                                                                      */
-/* ========================================================================== */
+static void busy_delay(volatile uint32_t cycles)
+{
+    while (cycles--) {
+        __NOP();
+    }
+}
+
+static void pulse_led(uint8_t count, uint32_t cycles)
+{
+    for (uint8_t i = 0; i < count; ++i) {
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
+        busy_delay(cycles);
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
+        busy_delay(cycles);
+    }
+}
+
+static void blink_forever(uint32_t cycles)
+{
+    while (1) {
+        HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
+        busy_delay(cycles);
+    }
+}
 
 int main(void)
 {
     HAL_Init();
-    SystemClock_Config();
     MX_GPIO_Init();
-    MX_DMA_Init();
-    MX_SPI1_Init();
+
+    /* Boot signature: 2 slow pulses = code reached main. */
+    pulse_led(2, LED_PULSE_CYCLES);
+
+    SystemClock_Config();
+    /* Clock OK: 3 pulses. */
+    pulse_led(3, LED_PULSE_CYCLES);
+
+    MX_I2C1_Init();
+
+    /* Probe common OLED addresses: 0x3C and 0x3D. */
+    uint8_t addr = OLED_I2C_ADDR_8BIT; /* 0x78 */
+    if (HAL_I2C_IsDeviceReady(&hi2c1, addr, 3, 20) != HAL_OK) {
+        uint8_t alt = (0x3D << 1);
+        if (HAL_I2C_IsDeviceReady(&hi2c1, alt, 3, 20) == HAL_OK) {
+            addr = alt;
+        } else {
+            /* No device detected on the bus. */
+            blink_forever(LED_SLOW_CYCLES);
+        }
+    }
 
     oled_config_t cfg = {
-        .hspi      = &hspi1,
-        .cs_port   = GPIOA, .cs_pin  = GPIO_PIN_4,
-        .dc_port   = GPIOB, .dc_pin  = GPIO_PIN_0,
-        .rst_port  = GPIOB, .rst_pin = GPIO_PIN_1
+        .hi2c    = &hi2c1,
+        .address = addr,
     };
 
     if (oled_init(&cfg) != OLED_OK) {
-        /* Fall back to a slow heartbeat on the user LED so we know we're alive. */
-        while (1) { HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5); HAL_Delay(200); }
+        /* OLED init failed even though the address ACKed. */
+        blink_forever(LED_MED_CYCLES);
     }
 
     oled_set_contrast(0xCF);
 
     uint16_t frame = 0;
     for (;;) {
-        /* IDLE — 3 s @ 10 Hz = 30 frames                                  */
+        /* IDLE — 3 s @ 10 Hz */
         oled_display_set_state(DISPLAY_STATE_IDLE);
         for (int i = 0; i < 30; ++i) {
             oled_update_animation_frame(frame++);
             oled_framebuffer_update_display();
-            HAL_Delay(100);
+            busy_delay(LED_PULSE_CYCLES);
         }
 
-        /* LISTENING — 3 s, refresh waveform every frame                   */
+        /* LISTENING — 3 s, refresh waveform every frame */
         oled_display_set_state(DISPLAY_STATE_LISTENING);
         for (int i = 0; i < 30; ++i) {
             fill_demo_waveform(frame);
             oled_display_listening(demo_audio, DEMO_SAMPLES);
             oled_framebuffer_update_display();
-            HAL_Delay(100);
+            busy_delay(LED_PULSE_CYCLES);
             ++frame;
         }
 
-        /* PROCESSING — 3 s                                                */
+        /* PROCESSING — 3 s */
         oled_display_set_state(DISPLAY_STATE_PROCESSING);
         for (int i = 0; i < 30; ++i) {
             oled_update_animation_frame(frame++);
             oled_framebuffer_update_display();
-            HAL_Delay(100);
+            busy_delay(LED_PULSE_CYCLES);
         }
 
-        /* RESPONDING — 5 s, with a multi-line response                    */
+        /* RESPONDING — 5 s */
         oled_display_set_state(DISPLAY_STATE_RESPONDING);
         for (int i = 0; i < 50; ++i) {
             oled_display_responding(
-                "Sure! The capital of France is Paris. Anything else?",
+                "Sure! The capital of France is Paris.",
                 frame++);
             oled_framebuffer_update_display();
-            HAL_Delay(100);
+            busy_delay(LED_PULSE_CYCLES);
         }
     }
 }
 
 /* ========================================================================== */
-/*  HAL glue (minimal, would normally be CubeMX-generated)                    */
+/*  HAL glue (minimal — would normally be CubeMX-generated)                   */
 /* ========================================================================== */
-
-void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
-{
-    if (hspi->Instance == SPI1) oled_spi_tx_complete_isr();
-}
 
 static void SystemClock_Config(void)
 {
-    /* HSI16 + PLL → 80 MHz SYSCLK. Identical to the cosmo-stm32 main.c.   */
     RCC_OscInitTypeDef osc = {0};
     RCC_ClkInitTypeDef clk = {0};
 
@@ -153,7 +169,9 @@ static void SystemClock_Config(void)
     osc.PLL.PLLP            = RCC_PLLP_DIV7;
     osc.PLL.PLLQ            = RCC_PLLQ_DIV2;
     osc.PLL.PLLR            = RCC_PLLR_DIV2;
-    HAL_RCC_OscConfig(&osc);
+    if (HAL_RCC_OscConfig(&osc) != HAL_OK) {
+        blink_forever(200000);
+    }
 
     clk.ClockType      = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
                        | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
@@ -161,7 +179,9 @@ static void SystemClock_Config(void)
     clk.AHBCLKDivider  = RCC_SYSCLK_DIV1;
     clk.APB1CLKDivider = RCC_HCLK_DIV1;
     clk.APB2CLKDivider = RCC_HCLK_DIV1;
-    HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_4);
+    if (HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_4) != HAL_OK) {
+        blink_forever(200000);
+    }
 }
 
 static void MX_GPIO_Init(void)
@@ -171,74 +191,49 @@ static void MX_GPIO_Init(void)
 
     GPIO_InitTypeDef g = {0};
 
-    /* CS / DC / RST as push-pull outputs, idle high (CS,RST), low (DC).  */
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);   /* CS */
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET); /* DC */
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_SET);   /* RST */
-
+    /* LD2 on PA5 for the fallback heartbeat. */
+    g.Pin   = GPIO_PIN_5;
     g.Mode  = GPIO_MODE_OUTPUT_PP;
     g.Pull  = GPIO_NOPULL;
-    g.Speed = GPIO_SPEED_FREQ_HIGH;
-
-    g.Pin = GPIO_PIN_4;          HAL_GPIO_Init(GPIOA, &g);
-    g.Pin = GPIO_PIN_0|GPIO_PIN_1; HAL_GPIO_Init(GPIOB, &g);
-
-    /* Onboard LD2 for the heartbeat fallback path. */
-    g.Pin = GPIO_PIN_5; HAL_GPIO_Init(GPIOA, &g);
-}
-
-static void MX_DMA_Init(void)
-{
-    __HAL_RCC_DMA1_CLK_ENABLE();
-    HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 1, 0);
-    HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
-}
-
-static void MX_SPI1_Init(void)
-{
-    /* Enable peripheral clocks before HAL_SPI_Init / HAL_DMA_Init.        */
-    __HAL_RCC_SPI1_CLK_ENABLE();
-
-    /* SPI1 SCK/MOSI on PA5/PA7 in AF5.                                    */
-    GPIO_InitTypeDef g = {0};
-    g.Pin       = GPIO_PIN_5 | GPIO_PIN_7;
-    g.Mode      = GPIO_MODE_AF_PP;
-    g.Pull      = GPIO_NOPULL;
-    g.Speed     = GPIO_SPEED_FREQ_HIGH;
-    g.Alternate = GPIO_AF5_SPI1;
+    g.Speed = GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(GPIOA, &g);
-
-    hspi1.Instance               = SPI1;
-    hspi1.Init.Mode              = SPI_MODE_MASTER;
-    hspi1.Init.Direction         = SPI_DIRECTION_2LINES;
-    hspi1.Init.DataSize          = SPI_DATASIZE_8BIT;
-    hspi1.Init.CLKPolarity       = SPI_POLARITY_LOW;     /* mode 0 */
-    hspi1.Init.CLKPhase          = SPI_PHASE_1EDGE;
-    hspi1.Init.NSS               = SPI_NSS_SOFT;
-    hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;  /* 80/8 = 10 MHz */
-    hspi1.Init.FirstBit          = SPI_FIRSTBIT_MSB;
-    hspi1.Init.TIMode            = SPI_TIMODE_DISABLE;
-    hspi1.Init.CRCCalculation    = SPI_CRCCALCULATION_DISABLE;
-    hspi1.Init.CRCPolynomial     = 7;
-    HAL_SPI_Init(&hspi1);
-
-    /* DMA1 Channel 3 → SPI1_TX. */
-    hdma_spi1_tx.Instance                 = DMA1_Channel3;
-    hdma_spi1_tx.Init.Request             = DMA_REQUEST_1;
-    hdma_spi1_tx.Init.Direction           = DMA_MEMORY_TO_PERIPH;
-    hdma_spi1_tx.Init.PeriphInc           = DMA_PINC_DISABLE;
-    hdma_spi1_tx.Init.MemInc              = DMA_MINC_ENABLE;
-    hdma_spi1_tx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
-    hdma_spi1_tx.Init.MemDataAlignment    = DMA_MDATAALIGN_BYTE;
-    hdma_spi1_tx.Init.Mode                = DMA_NORMAL;
-    hdma_spi1_tx.Init.Priority            = DMA_PRIORITY_MEDIUM;
-    HAL_DMA_Init(&hdma_spi1_tx);
-    __HAL_LINKDMA(&hspi1, hdmatx, hdma_spi1_tx);
+    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
 }
 
-/* DMA channel ISR — must call HAL_DMA_IRQHandler so the SPI-level
- * complete callback fires.                                                */
-void DMA1_Channel3_IRQHandler(void)
+static void MX_I2C1_Init(void)
 {
-    HAL_DMA_IRQHandler(&hdma_spi1_tx);
+    __HAL_RCC_I2C1_CLK_ENABLE();
+
+    /* PB8 = SCL, PB9 = SDA, both AF4, open-drain, pullup. */
+    GPIO_InitTypeDef g = {0};
+    g.Pin       = GPIO_PIN_8 | GPIO_PIN_9;
+    g.Mode      = GPIO_MODE_AF_OD;
+    g.Pull      = GPIO_PULLUP;
+    g.Speed     = GPIO_SPEED_FREQ_HIGH;
+    g.Alternate = GPIO_AF4_I2C1;
+    HAL_GPIO_Init(GPIOB, &g);
+
+    hi2c1.Instance              = I2C1;
+    /* Timing for 400 kHz Fast-mode at 80 MHz APB1 (PCLK1). */
+    hi2c1.Init.Timing           = 0x10909CEC;
+    hi2c1.Init.OwnAddress1      = 0;
+    hi2c1.Init.AddressingMode   = I2C_ADDRESSINGMODE_7BIT;
+    hi2c1.Init.DualAddressMode  = I2C_DUALADDRESS_DISABLE;
+    hi2c1.Init.OwnAddress2      = 0;
+    hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
+    hi2c1.Init.GeneralCallMode  = I2C_GENERALCALL_DISABLE;
+    hi2c1.Init.NoStretchMode    = I2C_NOSTRETCH_DISABLE;
+    if (HAL_I2C_Init(&hi2c1) != HAL_OK) {
+        blink_forever(250000);
+    }
+
+    /* Analog filter on, digital filter off. */
+    HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE);
+    HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0);
+}
+
+/* SysTick is required for HAL_Delay and HAL timeouts. */
+void SysTick_Handler(void)
+{
+    HAL_IncTick();
 }

@@ -95,6 +95,25 @@ oled_status_t oled_init(const oled_config_t *cfg)
         0x2E,             /* deactivate scroll                           */
         0xAF              /* display ON                                  */
     };
+#elif defined(OLED_CONTROLLER_SH1106)
+    /* SH1106 128x64 init. */
+    static const uint8_t init_seq[] = {
+        0xAE,             /* display OFF                                 */
+        0xD5, 0x80,       /* clock divide / oscillator                   */
+        0xA8, 0x3F,       /* multiplex ratio = 63 (64 rows)              */
+        0xD3, 0x00,       /* display offset = 0                          */
+        0x40,             /* start line = 0                              */
+        0xAD, 0x8B,       /* DC-DC on (internal)                         */
+        0xA1,             /* segment remap (X flip)                      */
+        0xC8,             /* COM scan dir remap (Y flip)                 */
+        0xDA, 0x12,       /* COM pins: alternative, no remap             */
+        0x81, 0x80,       /* contrast                                    */
+        0xD9, 0x1F,       /* precharge                                   */
+        0xDB, 0x40,       /* VCOMH deselect                              */
+        0xA4,             /* output follows RAM (not all-on)             */
+        0xA6,             /* normal (non-inverted) display               */
+        0xAF              /* display ON                                  */
+    };
 #else /* OLED_CONTROLLER_SH1107 — 128x128 */
     static const uint8_t init_seq[] = {
         0xAE,
@@ -199,6 +218,18 @@ const uint8_t *oled_framebuffer_raw(void) { return s_fb.buffer; }
 
 /* ---- Flush helpers ------------------------------------------------------- */
 
+#ifdef OLED_CONTROLLER_SH1106
+static oled_status_t sh1106_set_page_col(uint8_t page, uint8_t col)
+{
+    const uint8_t col_off = (uint8_t)(col + OLED_COL_OFFSET);
+    uint8_t cmds[3] = {
+        (uint8_t)(0xB0 | (page & 0x0F)),
+        (uint8_t)(0x00 | (col_off & 0x0F)),
+        (uint8_t)(0x10 | ((col_off >> 4) & 0x0F))
+    };
+    return i2c_write_cmd_list(cmds, 3);
+}
+#else
 static oled_status_t set_window(uint8_t x1, uint8_t x2, uint8_t p1, uint8_t p2)
 {
     uint8_t cmds[6] = {
@@ -207,6 +238,7 @@ static oled_status_t set_window(uint8_t x1, uint8_t x2, uint8_t p1, uint8_t p2)
     };
     return i2c_write_cmd_list(cmds, 6);
 }
+#endif
 
 oled_status_t oled_framebuffer_update_display(void)
 {
@@ -214,6 +246,17 @@ oled_status_t oled_framebuffer_update_display(void)
     if (!s_fb.dirty)       return OLED_OK;
 
     s_fb.busy = 1;
+#ifdef OLED_CONTROLLER_SH1106
+    for (uint8_t p = 0; p < OLED_PAGES; ++p) {
+        oled_status_t s = sh1106_set_page_col(p, 0);
+        if (s != OLED_OK) { s_fb.busy = 0; return s; }
+        s = i2c_write_data(&s_fb.buffer[p * OLED_WIDTH], OLED_WIDTH);
+        if (s != OLED_OK) { s_fb.busy = 0; return s; }
+    }
+    s_fb.dirty = 0;
+    s_fb.busy = 0;
+    return OLED_OK;
+#else
     oled_status_t s = set_window(0, OLED_WIDTH - 1, 0, OLED_PAGES - 1);
     if (s != OLED_OK) { s_fb.busy = 0; return s; }
 
@@ -221,6 +264,7 @@ oled_status_t oled_framebuffer_update_display(void)
     if (s == OLED_OK) s_fb.dirty = 0;
     s_fb.busy = 0;
     return s;
+#endif
 }
 
 oled_status_t oled_framebuffer_update_region(uint8_t x1, uint8_t y1,
@@ -238,10 +282,17 @@ oled_status_t oled_framebuffer_update_region(uint8_t x1, uint8_t y1,
      * a region aren't contiguous in the framebuffer since each page has
      * OLED_WIDTH bytes but we only want `span` of them.                   */
     for (uint8_t p = p1; p <= p2; ++p) {
+#ifdef OLED_CONTROLLER_SH1106
+        oled_status_t s = sh1106_set_page_col(p, x1);
+        if (s != OLED_OK) return s;
+        s = i2c_write_data(&s_fb.buffer[p * OLED_WIDTH + x1], span);
+        if (s != OLED_OK) return s;
+#else
         oled_status_t s = set_window(x1, x2, p, p);
         if (s != OLED_OK) return s;
         s = i2c_write_data(&s_fb.buffer[p * OLED_WIDTH + x1], span);
         if (s != OLED_OK) return s;
+#endif
     }
     return OLED_OK;
 }

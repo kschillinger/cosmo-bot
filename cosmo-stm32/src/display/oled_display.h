@@ -29,12 +29,19 @@ extern "C" {
 /*  Panel configuration                                                       */
 /* ========================================================================== */
 
-#ifdef OLED_PANEL_128x128_SH1107
+#if defined(OLED_PANEL_128x128_SH1107)
 #  define OLED_WIDTH         128
 #  define OLED_HEIGHT        128
 #  define OLED_PAGES          16
 #  define OLED_COL_OFFSET      0
 #  define OLED_CONTROLLER_SH1107
+#elif defined(OLED_PANEL_128x64_SH1106)
+   /* 128x64 SH1106 panels often use a +2 column offset. */
+#  define OLED_WIDTH         128
+#  define OLED_HEIGHT         64
+#  define OLED_PAGES           8
+#  define OLED_COL_OFFSET      2
+#  define OLED_CONTROLLER_SH1106
 #else
    /* Default: 128x64 SSD1306 (the typical 4-pin I2C "0.96 inch" module).   */
 #  define OLED_WIDTH         128
