@@ -1,8 +1,5 @@
 /**
- * oled_display.h — OLED display subsystem (128x128 SPI)
- *
- * Stubbed for FSM bring-up. Real implementation will speak SSD1327/SSD1306
- * over SPI and draw faces / waveforms / spinners.
+ * oled_display.h — OLED display subsystem (SSD1306, 128x64, I2C).
  */
 
 #ifndef OLED_DISPLAY_H

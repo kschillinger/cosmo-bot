@@ -170,6 +170,8 @@ void fsm_update_display(void)
         case FSM_STATE_ERROR:            fsm_display_error();            break;
         default: break;
     }
+
+    oled_update_display();
 }
 
 /* ========================================================================== */

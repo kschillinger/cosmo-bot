@@ -18,11 +18,10 @@ ESP32-C3 actually replying.
 [STT]   stt_init() (stub)
 [UART]  uart_init() -> UartLink_Init()
 [TTS]   tts_init() (stub)
-[OLED]  oled_init() (stub)
+[OLED] SSD1306 init complete (I2C1 PB8/PB9, addr=0x3C)
 [FSM] init complete; entering IDLE
 [1ms] [FSM] ? -> IDLE
 [FSM] enter IDLE
-[OLED] display_idle (stub)
 ```
 
 ## After pressing B1
@@ -33,7 +32,6 @@ ESP32-C3 actually replying.
 [3481ms] [FSM] IDLE -> LISTENING
 [FSM] enter LISTENING
 [AUDIO] audio_capture_start() (stub)
-[OLED]  display_listening(samples=16) (stub)
 
   ... ~500 ms of waveform updates ...
 
@@ -42,7 +40,6 @@ ESP32-C3 actually replying.
 [FSM] enter PROCESSING_STT
 [AUDIO] audio_get_buffer() (stub)
 [STT]   stt_process(size=16) (stub)
-[OLED]  display_processing(frame=0) (stub)
 
   ... ~300 ms of spinner ...
 
@@ -65,13 +62,11 @@ ESP32-C3 actually replying.
 [5013ms] [FSM] PROCESSING_TTS -> PLAYBACK
 [FSM] enter PLAYBACK
 [AUDIO] audio_play_buffer(size=32) (stub)
-[OLED]  display_responding("Hi there, friend!") (stub)
 
   ... ~500 ms ...
 
 [5514ms] [FSM] PLAYBACK -> IDLE
 [FSM] enter IDLE
-[OLED] display_idle (stub)
 ```
 
 ## Total round-trip (with stubs)
@@ -92,7 +87,6 @@ after ~5 s:
 [FSM] !! error 3: ESP32 UART timeout
 [FSM] SENDING_TO_ESP32 -> ERROR
 [FSM] enter ERROR  code=3 msg="ESP32 UART timeout"
-[OLED]  display_error("ESP32 UART timeout") (stub)
   ... 3 s ...
 [FSM] ERROR: display interval elapsed, returning to IDLE
 [FSM] ERROR -> IDLE
