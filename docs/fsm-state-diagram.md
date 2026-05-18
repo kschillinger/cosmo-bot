@@ -102,7 +102,7 @@ pio device monitor -e nucleo_l476rg
 | `stt.c`        | stub        | Returns "hello cosmo" after 300 ms             |
 | `uart_comm.c`  | **real**    | Wraps existing `uart_link.c` (Phase 1)         |
 | `tts.c`        | stub        | Returns dummy 32-byte buffer after 400 ms      |
-| `oled_display.c` | stub      | Logs to USART2 only (rate-limited)             |
+| `oled_display.c` | **real**  | SSD1306 I2C driver + framebuffer state renderers |
 | `system_utils.c` | **real**  | HAL wrappers + B1 debounce                     |
 
 So, out of the box, pressing B1 will run the FSM through every state with

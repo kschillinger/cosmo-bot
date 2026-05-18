@@ -36,6 +36,19 @@ Open each subfolder as its own PlatformIO project.
 
 Both boards run 3.3 V logic — direct connection, no level shifter.
 
+## OLED wiring (STM32 defaults)
+
+The current STM32 firmware expects an SSD1306 128x64 I2C OLED wired as:
+
+| Nucleo-L476RG | OLED |
+| ------------- | ---- |
+| PB8           | SCL  |
+| PB9           | SDA  |
+| 3V3           | VCC  |
+| GND           | GND  |
+
+Default I2C addresses probed in firmware are `0x3C` then `0x3D` (7-bit).
+
 ## Build
 
 ```bash
