@@ -49,6 +49,10 @@ enum Intent : uint8_t {
     INTENT_AFFIRMATION,
     INTENT_NEGATION,
     INTENT_COMPLIMENT,
+    INTENT_APOLOGY,
+    INTENT_LOVE,
+    INTENT_INSULT,
+    INTENT_PLAY,
     INTENT_FALLBACK,
     INTENT_COUNT       /* sentinel — number of real intents incl. fallback */
 };
