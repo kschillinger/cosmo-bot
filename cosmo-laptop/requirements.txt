@@ -1,0 +1,6 @@
+pycozmo
+Pillow
+numpy
+pyaudio
+openai-whisper
+piper-tts
