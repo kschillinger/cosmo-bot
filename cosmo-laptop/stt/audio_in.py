@@ -32,15 +32,18 @@ def record_until_silence(
     sample_rate: int = 16000,
     channels: int = 1,
     chunk_size: int = 1024,
-    silence_threshold: float = 500.0,
-    silence_duration: float = 1.0,
+    silence_threshold: float = 1500.0,
+    silence_duration: float = 1.5,
     max_seconds: float = 10.0,
+    min_speech_duration: float = 0.5,
     device_index: Optional[int] = None,
 ) -> np.ndarray:
     frames = []
     silence_chunks_needed = int((silence_duration * sample_rate) / chunk_size)
+    min_speech_chunks = int((min_speech_duration * sample_rate) / chunk_size)
     silent_chunks = 0
     heard_speech = False
+    speech_chunks = 0
     start_time = time.time()
 
     audio = pyaudio.PyAudio()
@@ -54,11 +57,13 @@ def record_until_silence(
 
                 if rms >= silence_threshold:
                     heard_speech = True
+                    speech_chunks += 1
                     silent_chunks = 0
                 elif heard_speech:
                     silent_chunks += 1
 
-                if heard_speech and silent_chunks >= silence_chunks_needed:
+                # Only stop if we've heard enough speech AND had silence after
+                if heard_speech and speech_chunks >= min_speech_chunks and silent_chunks >= silence_chunks_needed:
                     break
                 if time.time() - start_time >= max_seconds:
                     break

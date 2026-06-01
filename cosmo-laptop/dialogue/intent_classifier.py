@@ -11,7 +11,7 @@ class IntentClassifier:
         self,
         *,
         intents: Iterable[IntentDefinition] = INTENTS,
-        min_confidence_pct: int = 25,
+        min_confidence_pct: int = 10,
         max_tokens: int = 16,
     ) -> None:
         self._intents = list(intents)

@@ -16,10 +16,15 @@ class CosmoPipeline:
         voices_dir = os.path.join(assets_dir, "voices")
 
         self._cozmo = CozmoClient()
-        self._stt = WhisperSTT(model_name="tiny")
+        self._stt = WhisperSTT(model_name="base")
         self._classifier = IntentClassifier()
         self._picker = ResponsePicker()
-        self._tts = PiperTTS(voices_dir=voices_dir)
+        
+        try:
+            self._tts = PiperTTS(voices_dir=voices_dir)
+        except (TtsError, FileNotFoundError) as exc:
+            print(f"[TTS] Warning: {exc}. Continuing without TTS.")
+            self._tts = None
 
     def run(self) -> None:
         try:
@@ -33,6 +38,7 @@ class CosmoPipeline:
             return
 
         while True:
+            print("[Pipeline] Listening (muted to prevent feedback)...")
             try:
                 audio = record_until_silence()
             except AudioCaptureError as exc:
@@ -55,7 +61,15 @@ class CosmoPipeline:
                 self._safe_set_idle()
                 continue
 
+            # Tiny model hallucinates on silence—skip very short or generic transcriptions
+            if len(transcript) < 4 or transcript.lower() in ("you", "to", "the", "a", "is", "thank you", "or"):
+                print(f"[DEBUG] Skipped hallucination: '{transcript}'")
+                self._safe_set_idle()
+                continue
+
+            print(f"[DEBUG] Transcribed: {transcript}")
             intent, _confidence = self._classifier.classify(transcript)
+            print(f"[DEBUG] Classified: {intent} ({_confidence}%)")
             try:
                 response = self._picker.pick(intent)
             except (KeyError, ValueError) as exc:
@@ -64,22 +78,27 @@ class CosmoPipeline:
                 continue
 
             try:
-                wav_path = self._tts.synthesize(response)
+                if self._tts:
+                    wav_path = self._tts.synthesize(response)
+                else:
+                    print(f"[Dialogue] {response}")
+                    wav_path = None
             except (TtsError, FileNotFoundError, ValueError) as exc:
                 print(f"[TTS] Synthesis failed: {exc}")
-                self._safe_set_idle()
-                continue
+                print(f"[Dialogue] {response}")
+                wav_path = None
 
             expression = _expression_for_intent(intent)
             try:
                 self._cozmo.set_face(expression)
-                self._cozmo.play_wav(wav_path)
+                if wav_path and os.path.exists(wav_path):
+                    self._cozmo.play_wav(wav_path)
                 self._cozmo.set_face("idle")
             except CozmoActionError as exc:
                 print(f"[Cozmo] Playback failed: {exc}")
                 self._safe_set_idle()
             finally:
-                if os.path.exists(wav_path):
+                if wav_path and os.path.exists(wav_path):
                     os.remove(wav_path)
 
     def _safe_set_idle(self) -> None:
