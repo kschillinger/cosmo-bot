@@ -1,0 +1,13 @@
+# Python virtual environment
+.venv/
+
+# Byte-compiled / caches
+__pycache__/
+*.py[cod]
+
+# Downloaded Piper voice models (large; refetched by setup)
+assets/voices/*.onnx
+assets/voices/*.onnx.json
+
+# Generated test audio
+assets/test_*.wav
