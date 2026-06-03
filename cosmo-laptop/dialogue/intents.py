@@ -267,6 +267,8 @@ INTENTS: List[IntentDefinition] = [
         ],
     ),
 
+    IntentDefinition(
+        name="FALLBACK",
         keywords=None,
         responses=[
             "Hmm, didn't quite catch that one.",
