@@ -266,7 +266,8 @@ INTENTS: List[IntentDefinition] = [
             "The confidence. The audacity. I'm here for it.",
         ],
     ),
-
+IntentDefinition(
+        name="FALLBACK",
         keywords=None,
         responses=[
             "Hmm, didn't quite catch that one.",
