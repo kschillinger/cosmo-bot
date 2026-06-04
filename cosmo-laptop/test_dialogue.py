@@ -21,12 +21,20 @@ def main() -> None:
         "what can you do",
         "goodbye",
         "blorpy blorp",
+        # Cartman-flavoured intents
+        "respect my authoritah",
+        "i'm hungry, get me some cheesy poofs",
+        "you're fat",
+        "but mom",
+        "screw you guys",
+        "you suck",
     ]
 
     for text in samples:
         intent, confidence = classifier.classify(text)
         response = picker.pick(intent)
-        print(f"{text} -> {intent} ({confidence}%) -> {response}")
+        move = f"  [move: {response.move}]" if response.move else ""
+        print(f"{text} -> {intent} ({confidence}%) -> {response.text}{move}")
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@ from __future__ import annotations
 import random
 from typing import Dict, Iterable, Optional
 
-from .intents import INTENTS, IntentDefinition
+from .intents import INTENTS, IntentDefinition, Response
 
 
 class ResponsePicker:
@@ -19,7 +19,8 @@ class ResponsePicker:
         self._max_attempts = max_attempts
         self._rng = rng or random.SystemRandom()
 
-    def pick(self, intent_name: str) -> str:
+    def pick(self, intent_name: str) -> Response:
+        """Pick a Response (line + movement) for the intent, avoiding immediate repeats."""
         intent = self._intents.get(intent_name)
         if intent is None:
             raise KeyError(f"Unknown intent: {intent_name}")
